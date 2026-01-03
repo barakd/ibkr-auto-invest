@@ -5,3 +5,20 @@ out
 .eslintcache
 *.log*
 .vertx
+
+# Environment files
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Gateway logs (keep gateway, exclude logs)
+resources/gateway/logs/
+resources/gateway/.vertx/
+
+# Build outputs
+*.tgz
+*.tar.gz
+
+# IDE
+.idea/
