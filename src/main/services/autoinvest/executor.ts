@@ -7,7 +7,8 @@ import {
   replyToOrder,
   findConid,
   canAffordOrder,
-  OrderRequest
+  OrderRequest,
+  convertIlsToUsdAndWait
 } from '../ibkr'
 import { allocationStore } from '../../store/AllocationStore'
 
@@ -57,6 +58,12 @@ export interface AutoInvestResult {
   totalInvested: number
   results: OrderResult[]
   errors: string[]
+  currencyConversion?: {
+    converted: boolean
+    ilsAmount: number
+    orderId?: string
+    message: string
+  }
 }
 
 export interface OrderResult {
@@ -77,13 +84,12 @@ export async function analyzePortfolio(accountId: string): Promise<PortfolioAnal
   // Get current positions
   const positions = await getAllPositions(accountId)
 
-  // Get ILS to USD exchange rate
-  let ilsToUsdRate = 0.27 // Default fallback
-  try {
-    const rateResponse = await getExchangeRate('ILS', 'USD')
-    ilsToUsdRate = rateResponse.rate
-  } catch (error) {
-    console.warn('Could not fetch ILS/USD rate, using default:', error)
+  // Get ILS to USD exchange rate - required for accurate portfolio analysis
+  const rateResponse = await getExchangeRate('ILS', 'USD')
+  const ilsToUsdRate = rateResponse.rate
+  
+  if (!ilsToUsdRate || ilsToUsdRate <= 0) {
+    throw new Error('Failed to get valid ILS/USD exchange rate')
   }
 
   // Extract cash balances
@@ -260,16 +266,46 @@ export async function executeAutoInvest(accountId: string): Promise<AutoInvestRe
   let ordersPlaced = 0
   let ordersFailed = 0
   let totalInvested = 0
+  let currencyConversion: AutoInvestResult['currencyConversion'] = undefined
 
   // First, convert ILS to USD if we have ILS
   if (plan.ilsToConvert > 100) {
     // Only convert if > 100 ILS
     try {
-      // Note: Currency conversion needs special handling via forex orders
-      // For now, we'll skip this and document that user should convert manually
-      console.log(`Would convert ${plan.ilsToConvert} ILS to USD`)
+      console.log(`Converting ${plan.ilsToConvert} ILS to USD...`)
+      // Convert and wait for the order to fill (polls until filled or timeout)
+      const conversionResult = await convertIlsToUsdAndWait(
+        accountId,
+        plan.ilsToConvert,
+        true, // waitForFill
+        60000 * 3 // 3 minutes timeout
+      )
+      
+      currencyConversion = {
+        converted: conversionResult.success && conversionResult.filled === true,
+        ilsAmount: plan.ilsToConvert,
+        orderId: conversionResult.orderId,
+        message: conversionResult.message
+      }
+
+      if (conversionResult.success && conversionResult.filled) {
+        console.log(`Currency conversion completed: ${conversionResult.message}`)
+      } else if (conversionResult.success && !conversionResult.filled) {
+        console.warn(`Currency conversion order placed but not filled yet: ${conversionResult.message}`)
+        errors.push(`Currency conversion pending: ${conversionResult.message}`)
+      } else {
+        console.warn(`Currency conversion failed: ${conversionResult.message}`)
+        errors.push(`Currency conversion failed: ${conversionResult.message}`)
+      }
     } catch (error) {
-      errors.push(`Failed to convert ILS to USD: ${error}`)
+      const errorMessage = `Failed to convert ILS to USD: ${error}`
+      console.error(errorMessage)
+      errors.push(errorMessage)
+      currencyConversion = {
+        converted: false,
+        ilsAmount: plan.ilsToConvert,
+        message: errorMessage
+      }
     }
   }
 
@@ -355,6 +391,7 @@ export async function executeAutoInvest(accountId: string): Promise<AutoInvestRe
     ordersFailed,
     totalInvested,
     results,
-    errors
+    errors,
+    currencyConversion
   }
 }
